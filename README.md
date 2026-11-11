@@ -1,14 +1,17 @@
 # macbook-24h-server
 
-**English** | [中文](#中文说明)
+|             |             |
+| ----------- | ----------- |
+| **English** | [中文](#中文说明) |
 
 **Why?** A retired or spare MacBook is a silent, low-power machine you already
 own. This skill revives an old computer and puts it back to work as a 7×24
 server — home NAS, build agent, remote development hop, AI worker — no new
 hardware needed.
 
-A [WorkBuddy](https://www.workbuddy.cn) skill that turns any MacBook into a
-24/7 always-on server:
+An [Agent Skills](https://skill.md)-format skill — works with any
+skills-compatible AI agent such as **Claude Code**, **WorkBuddy**, **Trae**,
+**Qoder** and peers — that turns any MacBook into a 24/7 always-on server:
 
 - System / disk / network never idle-sleep
 - Closing the lid does not sleep it (while on AC power)
@@ -38,14 +41,18 @@ full diagnostic playbook.
 
 ## Install
 
-Drop the `macbook-24h-server/` folder into:
+The `macbook-24h-server/` folder follows the open Agent Skills format
+(`SKILL.md` + `scripts/` + `references/`), not tied to any one platform. Drop
+it into your agent's skills directory:
 
 ```
-~/.workbuddy/skills/          # user scope (recommended)
-<project>/.workbuddy/skills/  # project scope
+~/.claude/skills/            # Claude Code — personal scope
+.claude/skills/              # Claude Code — project scope
+~/.workbuddy/skills/         # WorkBuddy — user scope
+<project>/.workbuddy/skills/ # WorkBuddy — project scope
 ```
 
-Then tell WorkBuddy:
+Then tell your agent:
 
 > make this MacBook a 24-hour server
 
@@ -53,7 +60,7 @@ The skill asks you for the display-off timeout first (30 / 60 / 90 / custom /
 never), then installs, loads and verifies everything in one pass. If you choose
 "never", it warns you that the display will stay on forever before applying.
 
-## Use the script directly (without WorkBuddy)
+## Use the script directly (without any agent)
 
 ```bash
 # install: display off after 90 idle minutes, keep WorkBuddy remote-alive
@@ -79,18 +86,18 @@ bash scripts/macbook-24h-server.sh remove
 
 Options:
 
-| Flag | Values | Meaning |
-|---|---|---|
-| `--display-sleep` | `30`–`n` / `keep` / `off` | AC display timeout in minutes; `keep` pins the display awake forever via `-dimsu` (screen never turns off — expect higher power use and OLED burn-in risk); `off` leaves system setting untouched |
-| `--appnap-bundle` | any bundle id | Disable App Nap for that app (repeatable). Works for any GUI app, e.g. `com.tencent.workbuddy.mac`, `com.openai.codex`, `com.anthropic.claudefordesktop`, `cn.trae.app`, `com.qoder.QoderWakeCN.MenuBar`. Find ids with `osascript -e 'id of app "AppName"'` |
+| Flag              | Values                    | Meaning                                                                                                                                                                                                                                                      |
+| ----------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--display-sleep` | `30`–`n` / `keep` / `off` | AC display timeout in minutes; `keep` pins the display awake forever via `-dimsu` (screen never turns off — expect higher power use and OLED burn-in risk); `off` leaves system setting untouched                                                            |
+| `--appnap-bundle` | any bundle id             | Disable App Nap for that app (repeatable). Works for any GUI app, e.g. `com.tencent.workbuddy.mac`, `com.openai.codex`, `com.anthropic.claudefordesktop`, `cn.trae.app`, `com.qoder.QoderWakeCN.MenuBar`. Find ids with `osascript -e 'id of app "AppName"'` |
 
 ## How it works
 
-| Layer | Mechanism |
-|---|---|
-| Never idle-sleep | `caffeinate -ims` held by a LaunchAgent (`com.macbook24h.server`), `RunAtLoad` + `KeepAlive` |
-| Display off on schedule | `pmset -c displaysleep N` (AC only; authorization dialog if sudo unavailable) |
-| Remote apps survive | `defaults write <bundle> NSAppSleepDisabled -bool YES` + app relaunch |
+| Layer                   | Mechanism                                                                                    |
+| ----------------------- | -------------------------------------------------------------------------------------------- |
+| Never idle-sleep        | `caffeinate -ims` held by a LaunchAgent (`com.macbook24h.server`), `RunAtLoad` + `KeepAlive` |
+| Display off on schedule | `pmset -c displaysleep N` (AC only; authorization dialog if sudo unavailable)                |
+| Remote apps survive     | `defaults write <bundle> NSAppSleepDisabled -bool YES` + app relaunch                        |
 
 Requirements: macOS (Apple Silicon or Intel), AC power for lid-close
 protection. Tested on macOS 27.x / caffeinate and launchd stock tooling only.
@@ -117,6 +124,6 @@ MIT — see [LICENSE](LICENSE).
 
 最大的坑：`caffeinate` 管得了系统睡眠，管不了 macOS 对单个 App 的 **App Nap 节流**——熄屏后没有可见窗口的 App 心跳会被限流，云端判定设备离线，远程控制在「机器明明醒着」的情况下失灵。本技能用 `NSAppSleepDisabled` 精准解决。
 
-安装：把 `macbook-24h-server/` 放进 `~/.workbuddy/skills/`，对 WorkBuddy 说「把这台 MacBook 变成 24 小时服务器」即可。技能会先问你熄屏时间再动手。
+安装：本技能遵循开放的 **Agent Skills** 通用格式（`SKILL.md` + `scripts/` + `references/`），不限定平台——放入任意兼容 Agent 的技能目录即可，例如 **Claude Code** 的 `~/.claude/skills/`（个人）或 `.claude/skills/`（项目），**WorkBuddy** 的 `~/.workbuddy/skills/`。然后对你的 Agent 说「把这台 MacBook 变成 24 小时服务器」即可。技能会先问你熄屏时间再动手。
 
-不带 WorkBuddy 也可以直接跑脚本，用法见上方英文一节。
+不通过任何 Agent 也可以直接跑脚本，用法见上方英文一节。
