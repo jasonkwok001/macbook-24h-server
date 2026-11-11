@@ -10,7 +10,9 @@
 #   <minutes> : set AC display sleep to N minutes (may trigger a macOS admin
 #               authorization dialog via osascript when sudo is unavailable)
 #   keep      : do not touch the system displaysleep value; keep display awake
-#               forever via caffeinate -d (server stays visually "on")
+#               forever via caffeinate -dimsu (-d prevent-display-sleep plus
+#               -u simulate user activity => UserIsActive asserted; the screen
+#               NEVER turns off — higher power use, OLED burn-in risk)
 #   off       : leave displaysleep as-is but do NOT prevent display sleep
 #               (display turns off per whatever the system setting is)
 # --appnap-bundle: additionally disable App Nap for the given app bundle id(s),
@@ -127,7 +129,8 @@ cmd_setup() {
 
   local flags
   if [ "$display_sleep" = "keep" ]; then
-    # Never let the display sleep either.
+    # Never let the display sleep either (-d pins display, -u asserts
+    # UserIsActive). WARN upstream: the screen will stay lit forever.
     flags="-dimsu"
   else
     # Allow display to sleep; caffeinate only protects system/disk/lid.

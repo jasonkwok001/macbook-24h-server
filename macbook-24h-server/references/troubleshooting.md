@@ -2,8 +2,9 @@
 
 Symptom: the MacBook is clearly still awake (machine, disk and network keep
 running; `caffeinate` assertions all green), but a remote-control channel
-(e.g. WorkBuddy mobile app, or an app's websocket heartbeat to its cloud
-relay) silently goes offline until someone sits in front of the machine and
+(e.g. the mobile companion of WorkBuddy / Codex / Claude / Trae / Qoder, or
+any app's websocket heartbeat to its cloud relay) silently goes offline until
+someone sits in front of the machine and
 interacts with it (witness: the OS demands the login password).
 
 ## Root cause: App Nap (per-app), not system sleep
