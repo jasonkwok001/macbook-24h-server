@@ -14,7 +14,6 @@ skills-compatible AI agent such as **Claude Code**, **WorkBuddy**, **Trae**,
 **Qoder** and peers — that turns any MacBook into a 24/7 always-on server:
 
 - System / disk / network never idle-sleep
-- Closing the lid does not sleep it (while on AC power)
 - The display still turns off after idle — you choose when: **30 / 60 / 90
   minutes or fully custom** — or **never**: the skill switches caffeinate to
   `-dimsu` (`-u` asserts `UserIsActive`) and warns you up front that the screen
@@ -24,10 +23,20 @@ skills-compatible AI agent such as **Claude Code**, **WorkBuddy**, **Trae**,
   screen turning off
 - Login auto-start, crash auto-restart via a user-level LaunchAgent — no root
   daemon needed
+- An `audit` command that proves it from the power log — not just "the
+  assertions look green right now"
+
+> **Supported 24/7 mode: plugged in, lid open, display off.**
+> A closed lid is *not* an always-on mode. On AC the machine skips full sleep
+> but drops to `DarkWake due to 'Clamshell Sleep'`, which suspends user
+> processes and can strand a remote session for hours — measured at **467
+> minutes** of silence on a real MacBook while every caffeinate assertion
+> stayed green. On battery, closing the lid sleeps outright. Details:
+> [`references/verification-report-2026-11-14.md`](references/verification-report-2026-11-14.md).
 
 ## The pitfall this skill fixes
 
-`caffeinate` alone is not enough for a headless Mac. Two classic traps:
+`caffeinate` alone is not enough for a headless Mac. Three classic traps:
 
 1. **App Nap** — macOS throttles the timers/websockets of apps with no visible
    window once the display is off. The machine is awake, but your remote-control
@@ -35,6 +44,9 @@ skills-compatible AI agent such as **Claude Code**, **WorkBuddy**, **Trae**,
    `NSAppSleepDisabled` per app.
 2. **Network roaming** — a laptop moving between home Wi-Fi and a phone hotspot
    changes its public IP and leaves stale websockets half-open.
+3. **Clamshell `DarkWake`** — a shut lid on AC produces the *same symptom*
+   (awake but unreachable) through a different mechanism, so App Nap flags do
+   nothing for it. Fix: keep the lid open.
 
 See [`references/troubleshooting.md`](references/troubleshooting.md) for the
 full diagnostic playbook.
@@ -77,12 +89,29 @@ bash scripts/macbook-24h-server.sh setup \
   --appnap-bundle cn.trae.app \
   --appnap-bundle com.qoder.QoderWakeCN.MenuBar
 
-# health check
+# health check (current configuration)
 bash scripts/macbook-24h-server.sh verify --appnap-bundle com.tencent.workbuddy.mac
+
+# audit (proof from the power log: did it actually stay awake?)
+bash scripts/macbook-24h-server.sh audit
+bash scripts/macbook-24h-server.sh audit --days 7
 
 # remove
 bash scripts/macbook-24h-server.sh remove
 ```
+
+`verify` vs `audit` — they answer different questions:
+
+| Command  | Question                                | Source                  |
+| -------- | --------------------------------------- | ----------------------- |
+| `verify` | Is the setup correct *right now*?        | live `pmset`/`launchctl` |
+| `audit`  | Has it *actually* stayed awake?          | `pmset -g log` history  |
+
+`verify` will happily print all-green on a machine that slept for seven hours
+yesterday, because assertions describe the present. `audit` derives the service
+start time from the live assertion age and reports three failure modes
+separately — AC full-sleeps, AC clamshell `DarkWake`s (with the longest silent
+gap), and battery outages — because each needs a different fix.
 
 Options:
 
@@ -90,6 +119,7 @@ Options:
 | ----------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `--display-sleep` | `30`–`n` / `keep` / `off` | AC display timeout in minutes; `keep` pins the display awake forever via `-dimsu` (screen never turns off — expect higher power use and OLED burn-in risk); `off` leaves system setting untouched                                                            |
 | `--appnap-bundle` | any bundle id             | Disable App Nap for that app (repeatable). Works for any GUI app, e.g. `com.tencent.workbuddy.mac`, `com.openai.codex`, `com.anthropic.claudefordesktop`, `cn.trae.app`, `com.qoder.QoderWakeCN.MenuBar`. Find ids with `osascript -e 'id of app "AppName"'` |
+| `--days`          | `audit` only, e.g. `7`    | Audit a fixed trailing window instead of "since caffeinate started"                                                                                                                                                                                          |
 
 ## How it works
 
@@ -99,16 +129,21 @@ Options:
 | Display off on schedule | `pmset -c displaysleep N` (AC only; authorization dialog if sudo unavailable)                |
 | Remote apps survive     | `defaults write <bundle> NSAppSleepDisabled -bool YES` + app relaunch                        |
 
-Requirements: macOS (Apple Silicon or Intel), AC power for lid-close
-protection. Tested on macOS 27.x / caffeinate and launchd stock tooling only.
+Requirements: macOS (Apple Silicon or Intel), AC power. **Keep the lid open** —
+a closed lid on AC drops to `DarkWake` and is not a supported always-on mode.
+Tested on macOS 27.x / caffeinate and launchd stock tooling only.
 
 ## Caveats
 
-- Lid-close protection requires AC power (Apple hard rule — battery + lid
-  closed always sleeps).
+- **Keep the lid open.** On AC a shut lid produces `DarkWake due to 'Clamshell
+  Sleep'`, which suspends user processes; a measured run lost 467 minutes of
+  service while all assertions stayed green. On battery, closing the lid sleeps
+  outright (Apple hard rule).
 - `NSAppSleepDisabled` takes effect only after the target app relaunches.
 - `remove` uninstalls the agent but does not restore your previous
   `displaysleep` value automatically.
+- `verify` reads live state and can report green on a machine that slept
+  earlier. Use `audit` when you need proof from history.
 
 ## License
 
