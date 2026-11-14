@@ -297,7 +297,8 @@ cmd_audit() {
     # Battery events: expected only if unplugged; each one is a real outage.
     if [ "$batt" -gt 0 ]; then
       echo "[WARN] $batt event(s) on battery — outage while unplugged"
-      printf '%s\n' "$events" | grep "Using Batt" | cut -c1-19 | head -3 | sed 's/^/         first: /'
+      printf '%s\n' "$events" | grep "Using Batt" | cut -c1-19 | head -3 \
+        | awk 'NR==1{print "         first: " $0} NR>1{print "            then: " $0}'
       echo "         (plug in AC for true 24/7; lid-close never holds on battery)"
     fi
   fi
