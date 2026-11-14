@@ -176,9 +176,16 @@ cmd_verify() {
   fi
   # 2. assertions
   local a
+  local on_batt=0
+  [ "$(current_power_source)" = "BATT" ] && on_batt=1
   for a in PreventUserIdleSystemSleep PreventDiskIdle PreventSystemSleep; do
     if pmset -g assertions | awk "/^ +$a /{print \$2}" | grep -q 1; then
       echo "[OK]   $a = 1"
+    elif [ "$a" = "PreventSystemSleep" ] && [ "$on_batt" = "1" ]; then
+      # caffeinate -s only asserts while on AC (Apple semantics), so a 0 here on
+      # battery is correct behaviour, not a broken install. Say so instead of
+      # printing a FAIL that sends people chasing a non-problem.
+      echo "[N/A]  PreventSystemSleep = 0 (expected on battery: caffeinate -s only asserts on AC)"
     else
       echo "[FAIL] $a not asserted"
     fi
@@ -285,13 +292,15 @@ cmd_audit() {
     fi
 
     # Clamshell DarkWake on AC: the Mac drops to DarkWake while the lid is shut
-    # even with caffeinate assertions. Long gaps are the real 24/7 risk.
+    # even with caffeinate assertions, and stays there until the next real wake.
+    # This is a *state dwell*, not a sleep event per se — report it as such.
     local clam_ac
     clam_ac=$(printf '%s\n' "$events" | grep "DarkWake state due to 'Clamshell" | grep -c "Using AC")
     if [ "$clam_ac" -gt 0 ]; then
       echo "[WARN] $clam_ac clamshell DarkWake event(s) on AC (lid-shut drop-outs)"
-      echo "       Longest gap:"
-      longest_gap "$start_str" | sed 's/^/         /'
+      # Dwell time = from each clamshell DarkWake until the next FullWake, i.e.
+      # how long the machine sat suspended-but-not-asleep.
+      dwell_report "$start_str" | sed 's/^/         /'
     fi
 
     # Battery events: expected only if unplugged; each one is a real outage.
@@ -308,22 +317,92 @@ cmd_audit() {
   echo "========================================"
 }
 
-# longest_gap: print the longest silent stretch between consecutive sleep/wake
-# events, which approximates how long the machine was actually down.
-longest_gap() {
+# dwell_report: measure how long the machine sat in clamshell DarkWake, then ask
+# the crucial follow-up — did caffeinate keep refreshing its assertion in there?
+#
+# The distinction decides whose fault an outage is:
+#   kernel ticking  => the machine was alive, so the remote path died for some
+#                      other reason (Wi-Fi, router, VPN, NAT timeout, the app's
+#                      websocket). Power settings are NOT the culprit.
+#   kernel silent   => the machine genuinely suspended; power settings are.
+#
+# Never let a quiet stretch in the power log stand in for proof of sleep: powermgmt
+# only logs transitions, so a stable awake machine looks exactly like a dead one.
+dwell_report() {
   local start_str="$1"
-  # Build "epoch<TAB>readable" pairs, then let awk pick the largest delta.
-  # (BSD awk on macOS has no strftime, so formatting stays in date/sed.)
-  pmset -g log 2>/dev/null \
-    | grep -E "Entering (Sleep|DarkWake) state|Wake from" \
-    | awk -v t="$start_str" 'length(t)==0 || substr($0,1,19) >= t' \
-    | grep -oE "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}" \
-    | while IFS= read -r ts; do
-        e=$(date -j -f "%Y-%m-%d %H:%M:%S" "$ts" +%s 2>/dev/null) || continue
-        printf '%s\t%s\n' "$e" "$ts"
-      done \
-    | awk -F'\t' 'NR>1{d=$1-p; if(d>max){max=d; a=pt; b=$2}} {p=$1; pt=$2}
-                  END{if(max>0) printf "%d min (%s -> %s)\n", max/60, a, b}'
+
+  local timeline
+  timeline=$(
+    pmset -g log 2>/dev/null \
+      | grep -E "Entering DarkWake state due to 'Clamshell|DarkWake to FullWake" \
+      | awk -v t="$start_str" 'length(t)==0 || substr($0,1,19) >= t' \
+      | while IFS= read -r line; do
+          # bash 3.2 mis-parses `case` inside $( ), so use pattern-substitution tests.
+          # DOWN lines read "Entering DarkWake state due to 'Clamshell Sleep'",
+          # UP lines read "DarkWake to FullWake from Deep Idle ..." — test the
+          # distinguishing token, not word order.
+          kind=""
+          if [ "${line#*Clamshell}" != "$line" ]; then kind=DOWN; fi
+          if [ "${line#*FullWake}" != "$line" ]; then kind=UP; fi
+          [ -n "$kind" ] || continue
+          ts=${line:0:19}
+          e=$(date -j -f "%Y-%m-%d %H:%M:%S" "$ts" +%s 2>/dev/null) || continue
+          printf '%s\t%s\t%s\n' "$e" "$kind" "$ts"
+        done
+  )
+
+  if [ -z "$timeline" ]; then
+    echo "no clamshell DarkWake -> FullWake pair in window"
+    return 0
+  fi
+
+  # Pair each DOWN with the following UP; keep the longest. A trailing unclosed
+  # DOWN means the machine is still sitting there, so cap it at "now".
+  local best
+  best=$(printf '%s\n' "$timeline" | awk -F'\t' -v now="$(date +%s)" '
+    $2=="DOWN" && down=="" { down=$1; downt=$3 }
+    $2=="UP"   && down!="" { d=$1-down
+                             if (d>max) { max=d; a=downt; b=$3; s=down }
+                             down="" }
+    END {
+      if (down!="") { d=now-down
+                      if (d>max) { max=d; a=downt; b="(still down)"; s=down } }
+      if (max>0) printf "%d\t%s\t%s\t%s\n", max, s, a, b
+    }')
+
+  if [ -z "$best" ]; then
+    echo "clamshell DarkWake came and went inside a single minute"
+    return 0
+  fi
+
+  local max s a b
+  IFS=$'\t' read -r max s a b <<< "$best"
+  echo "longest DarkWake dwell: $((max / 60)) min ($a -> $b)"
+
+  # Count assertion refreshes inside that dwell window.
+  local e_str refreshes expected
+  if [ "$b" = "(still down)" ]; then
+    e_str=$(date '+%Y-%m-%d %H:%M:%S')
+  else
+    e_str="$b"
+  fi
+  refreshes=$(pmset -g log 2>/dev/null \
+    | awk -v s="$a" -v e="$e_str" 'substr($0,1,19) >= s && substr($0,1,19) <= e' \
+    | grep -c "caffeinate) Summary PreventUserIdleSystemSleep")
+  expected=$(( max / 900 ))
+
+  echo "assertion refreshes in it: $refreshes (expected ~$expected at 15-min cadence)"
+  if [ "$expected" -gt 0 ] && [ "$refreshes" -ge $(( expected * 8 / 10 )) ]; then
+    echo "   kernel ticked throughout => DarkWake, not a power-off sleep."
+    echo "   But DarkWake parks user processes, so a remote session can still die"
+    echo "   here. Power logs cannot separate 'dead Wi-Fi' from 'parked app'; if"
+    echo "   that split matters, check router/NAT logs for the same window."
+  else
+    echo "   assertions went quiet => the machine was genuinely suspended."
+  fi
+  echo "   Discriminator: outage WITH a dwell like this = lid/power side."
+  echo "                 outage with NO dwell at all (machine continuously"
+  echo "                 awake) = network side; the skill is not at fault."
 }
 
 case "${1:-}" in

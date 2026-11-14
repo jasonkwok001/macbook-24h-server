@@ -110,6 +110,9 @@ All of these must be green/informational:
 
 - caffeinate process alive; `PreventUserIdleSystemSleep`, `PreventDiskIdle`,
   `PreventSystemSleep` all = 1
+- `PreventSystemSleep` = 0 is **expected while on battery** and prints as
+  `[N/A]`, not a failure: `caffeinate -s` only asserts on AC by design. On
+  battery the machine will sleep on lid-close regardless, so plug in.
 - `PreventUserIdleDisplaySleep` = 0 (display may turn off) — or = 1 in `keep` mode
 - `displaysleep(AC)` equals the chosen minutes
 - LaunchAgent plist exists (login persistence)
@@ -133,10 +136,42 @@ fixes:
 | full `Sleep` on AC | assertions not holding | re-run setup, check plist |
 | `DarkWake` on AC, lid shut | lid-close drop-out (see below) | leave the lid open |
 | events on battery | unplugged / power cut | plug in AC |
+| no events, still unreachable | network/app, **not** power | see 4c; do not touch setup |
 
 Always run `audit` before telling a user their machine has been up
 continuously. `uptime` alone is misleading: the host counts time since boot,
 so it looks identical whether the machine served requests or was asleep.
+
+### 4c. When the machine was awake but the user still could not connect
+
+Do not attribute every outage to sleep. An unreachable Mac has at least two
+independent failure domains, and this skill only owns one of them:
+
+| Domain | Typical causes | What the power log shows |
+|---|---|---|
+| Power / lid (this skill) | lid shut, unplugged, sleep assertions lost | a `DarkWake` or `Sleep` dwell covering the outage window |
+| Network / app (not this skill) | Wi-Fi drop, router reboot, ISP, VPN expiry, NAT timeout, app websocket closed | **no dwell at all** — the machine stayed continuously awake |
+
+The discriminator is whether a dwell exists over the outage window. If the user
+reports "it was unreachable from 02:00 to 10:00" and `audit` shows the box was
+awake the whole time, the skill is working and the fault is downstream of the
+Mac. Say that plainly instead of "fixing" a power configuration that was never
+broken.
+
+Two traps that produce false blame:
+
+- **Silence in `pmset -g log` is not evidence of sleep.** Powermgmt only logs
+  *transitions*. A machine that stays awake for eight hours writes almost
+  nothing, which looks exactly like a dead one.
+- **Refreshing assertions do not prove the remote path is alive.** In
+  `DarkWake` the kernel keeps running and `caffeinate` keeps renewing its
+  assertions on schedule, yet user processes are parked and a remote session
+  still dies. Assertion cadence proves "not powered off", not "reachable".
+
+`audit` reports the dwell length plus the assertion-refresh count inside it, and
+states which side to investigate. It cannot read Wi-Fi state — the power log
+does not record it — so when the split matters, ask for router/NAT logs covering
+the same window rather than guessing.
 
 ### 5. Handoff notes to the user
 
