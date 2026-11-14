@@ -136,7 +136,7 @@ fixes:
 | full `Sleep` on AC | assertions not holding | re-run setup, check plist |
 | `DarkWake` on AC, lid shut | lid-close drop-out (see below) | leave the lid open |
 | events on battery | unplugged / power cut | plug in AC |
-| no events, still unreachable | network/app, **not** power | see 4c; do not touch setup |
+| no events, still unreachable | App Nap or network — **not** power | see 4c; do not touch the plist |
 
 Always run `audit` before telling a user their machine has been up
 continuously. `uptime` alone is misleading: the host counts time since boot,
@@ -144,19 +144,27 @@ so it looks identical whether the machine served requests or was asleep.
 
 ### 4c. When the machine was awake but the user still could not connect
 
-Do not attribute every outage to sleep. An unreachable Mac has at least two
-independent failure domains, and this skill only owns one of them:
+Do not attribute every outage to sleep. An unreachable Mac has three independent
+failure domains. This skill owns two of them and cannot fix the third:
 
-| Domain | Typical causes | What the power log shows |
-|---|---|---|
-| Power / lid (this skill) | lid shut, unplugged, sleep assertions lost | a `DarkWake` or `Sleep` dwell covering the outage window |
-| Network / app (not this skill) | Wi-Fi drop, router reboot, ISP, VPN expiry, NAT timeout, app websocket closed | **no dwell at all** — the machine stayed continuously awake |
+| Domain | Typical causes | What the power log shows | Owned here? |
+|---|---|---|---|
+| Power / lid | lid shut, unplugged, sleep assertions lost | a `DarkWake` or `Sleep` dwell covering the outage window | **yes** — `setup` / lid-open rule |
+| App throttling | App Nap starved the heartbeat | **no dwell** — machine continuously awake | **yes** — `setup --appnap-bundle <id>` |
+| Network | Wi-Fi drop, router reboot, ISP, VPN expiry, NAT timeout, DHCP lease change, app websocket closed | **no dwell** — machine continuously awake | **no** — nothing on this host can fix a router |
 
-The discriminator is whether a dwell exists over the outage window. If the user
-reports "it was unreachable from 02:00 to 10:00" and `audit` shows the box was
-awake the whole time, the skill is working and the fault is downstream of the
-Mac. Say that plainly instead of "fixing" a power configuration that was never
-broken.
+The discriminator is whether a **dwell** exists over the outage window:
+
+- **Dwell present** → the machine itself was parked. That is this skill's domain
+  (lid shut, or unplugged), and the fix is a power/lid change.
+- **No dwell at all** → the machine was awake the whole time. Power settings are
+  not the cause. Two candidates remain, and the power log cannot separate them:
+  App Nap (fixable here, per-bundle) and network (not fixable here).
+
+So a clean `audit` clears the *power* domain only. It does **not** prove the
+service was reachable, and it does not clear the app domain — check
+`NSAppSleepDisabled` for the bundle before blaming the network. Only when both
+power and App Nap are ruled out should the network be named.
 
 Two traps that produce false blame:
 

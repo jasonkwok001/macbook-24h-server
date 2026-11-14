@@ -4,7 +4,7 @@
 - **Host:** MacBook (Apple Silicon, built-in Liquid Retina XDR, macOS 26)
 - **Skill version tested:** `jasonkwok001/macbook-24h-server` @ `e7c333e`
 - **Scenario:** lid open, display off after idle, remote session driven from a phone through WorkBuddy
-- **Verdict:** **PASS on configuration, PASS on AC sleep behaviour, but the "lid-close on AC" guarantee is overstated** — see Finding 3.
+- **Verdict:** **PASS on configuration, PASS on AC idle-sleep behaviour, but the "lid-close on AC" guarantee is overstated** — see Finding 3. The scope of the guarantee is also narrower than it reads: this skill owns the power/lid and App Nap domains, not the network — see Finding 4.
 
 ---
 
@@ -92,33 +92,45 @@ The honest statement of the guarantee is therefore narrower than the skill curre
 
 > On AC power, an **open lid** with the display off is fully protected — system, disk and network keep running indefinitely. A **closed lid** on AC reduces the machine to `DarkWake`, which suspends user processes and can silence a remote session for hours. Lid-close operation is not a supported 24/7 mode; leave the lid open with the display off.
 
-### Finding 4 — "Unreachable" has more than one owner, and this skill owns only one.
+### Finding 4 — "Unreachable" has more than one owner, and this skill owns two of three.
 
 Everything above analyses the power domain. But a Mac that cannot be reached may
 be perfectly healthy on the power side and failing somewhere else entirely:
 
-| Domain | Typical cause | Power log signature |
-|---|---|---|
-| Power / lid | lid shut, unplugged, assertions lost | a `DarkWake` or `Sleep` dwell covering the outage |
-| App throttling | App Nap starved the heartbeat | no dwell; machine fully awake |
-| Network | Wi-Fi drop, router reboot, ISP, VPN expiry, NAT timeout, DHCP lease change | no dwell; machine fully awake |
+| Domain | Typical cause | Power log signature | Owned by this skill |
+|---|---|---|---|
+| Power / lid | lid shut, unplugged, assertions lost | a `DarkWake` or `Sleep` **dwell** covering the outage | yes — `setup`, lid-open rule |
+| App throttling | App Nap starved the heartbeat | **no dwell**; machine fully awake | yes — `setup --appnap-bundle <id>` |
+| Network | Wi-Fi drop, router reboot, ISP, VPN expiry, NAT timeout, DHCP lease change | **no dwell**; machine fully awake | **no** — nothing on this host fixes a router |
 
-The last two are indistinguishable from inside the machine, and neither leaves a
-trace in `pmset -g log`. So the correct reading of a clean audit is narrow: **the
-power configuration did not cause the outage** — not "the machine was reachable".
+The discriminator is the presence of a **dwell**. A dwell means the machine
+itself was parked, which is this skill's domain. No dwell means it stayed awake,
+which rules the power configuration out — but not the app: App Nap is also
+fixable here, per bundle, so it must be checked before the network is blamed.
+App Nap and a dead link are indistinguishable from inside the machine, because
+neither writes anything to `pmset -g log`.
+
+The correct reading of a clean audit is therefore narrow: **the power
+configuration did not cause the outage** — not "the machine was reachable", and
+not "the network is to blame". Only after both power and `NSAppSleepDisabled`
+are cleared does the network become the leading explanation.
 
 Practical consequence for diagnosis: if a user reports an outage and `audit`
-shows no dwell over that window, stop. Do not re-run `setup`. Ask for router or
-NAT logs for the same window, check `airportd` for a deauth/roam burst, and
-compare public IP before/after. Reconfiguring power cannot fix a router, and
-assuming it was power hides the real cause.
+shows no dwell over that window, do not re-run `setup` blindly. Check the App Nap
+flag for the bundle first; if it is already `1`, ask for router or NAT logs for
+the same window, check `airportd` for a deauth/roam burst, and compare public IP
+before/after. Reconfiguring power cannot fix a router, and assuming it was power
+hides the real cause.
 
 Limitation to state honestly: this machine cannot check the 11/12 window
 retroactively. `/var/log/wifi.log` rotated at `2026-11-14 00:30` and the unified
 log is not readable from a sandboxed shell (`log: Cannot run while sandboxed`),
 so whether the 467-minute outage was parked processes or a dead link is **not
-recoverable** from this host. The audit should report the dwell and say the split
-is unknown, rather than assert either story.
+recoverable** from this host. What *is* established is that a dwell exists over
+that window, which places it in the lid/power domain — but the 467 minutes are
+also consistent with parked processes rather than a dropped link, so even this
+case cannot be attributed to the network. The audit reports the dwell and says
+the split is unknown, rather than asserting either story.
 
 ---
 
