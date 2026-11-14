@@ -36,7 +36,21 @@ The two mechanisms are orthogonal.
   `192.168.x.x`), the public IP changes and stale websockets enter a
   half-open state. Pin the server Mac to one network.
 - **Battery + lid close WILL sleep regardless of `caffeinate -s`.** Apple
-  hard rule; lid-close protection only holds while on AC power.
+  hard rule; lid-close operation only holds while on AC power.
+- **AC + lid close is still not always-on.** On AC the machine skips full
+  `Sleep` but enters `DarkWake due to 'Clamshell Sleep'`, which suspends user
+  processes and can silence a remote session for hours (measured: 467 minutes
+  with no wake record). `DarkWake` produces the *same symptom* as App Nap —
+  machine looks awake, session is dead — so check the power source and lid
+  state before blaming App Nap. See `verification-report-2026-11-14.md`.
+- **`ps` may be unavailable inside agent shells.** `ps -p <pid> -o lstart=`
+  can fail with `operation not permitted` in a brokered/sandboxed session
+  while `pgrep` and `launchctl print` still work. Derive process start time
+  from the assertion age (`pmset -g assertions`, e.g. `60:20:04`) instead of
+  `ps`, or the health check reports a false negative.
+- **BSD `awk` has no `strftime`.** Timestamp formatting in log analysis must
+  go through `date -j -f`, not `awk`'s `strftime`, or the check dies with
+  "calling undefined function".
 - **Screensaver password prompt is not the culprit.** "Asks for password"
   after idle only proves the machine locked, not that it slept. Cross-check
   `pmset -g log` sleep-event counts to confirm the machine stayed awake.

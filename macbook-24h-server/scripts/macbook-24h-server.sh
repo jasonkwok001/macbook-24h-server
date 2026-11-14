@@ -1,10 +1,16 @@
 #!/bin/bash
 # macbook-24h-server.sh — Turn a MacBook into a 24/7 always-on server.
-# Subcommands: setup | verify | remove
+# Subcommands: setup | verify | audit | remove
 # Usage:
 #   macbook-24h-server.sh setup  [--display-sleep <minutes|keep|off>] [--appnap-bundle <bundle-id> ...]
 #   macbook-24h-server.sh verify [--appnap-bundle <bundle-id> ...]
+#   macbook-24h-server.sh audit  [--days N]
 #   macbook-24h-server.sh remove [--restore-defaults]
+#
+# verify checks the *current* configuration; audit checks *history* — it reads
+# the power log to prove whether the machine actually stayed awake since
+# caffeinate started. Green assertions do not prove a clean sleep history, so
+# run audit when you need evidence rather than configuration.
 #
 # --display-sleep:
 #   <minutes> : set AC display sleep to N minutes (may trigger a macOS admin
@@ -184,7 +190,7 @@ cmd_verify() {
   # 4. displaysleep value
   echo "[INFO] displaysleep(AC) = $(pmset -g custom | sed -n '/AC Power/,$p' | awk '/displaysleep/{print $2; exit}')"
   # 5. power source
-  echo "[INFO] power source = $(current_power_source)  (BATT + lid close WILL sleep: Apple hard rule)"
+  echo "[INFO] power source = $(current_power_source)  (on BATT the machine sleeps; on AC a shut lid still drops to DarkWake — run 'audit')"
   # 6. appnap
   for b in "${bundles[@]:-}"; do
     [ -z "$b" ] && continue
@@ -210,9 +216,119 @@ cmd_remove() {
   info "LaunchAgent removed. (Note: any displaysleep value previously set remains; restore with e.g. 'sudo pmset -c displaysleep 10' if desired.)"
 }
 
+# ---------- audit ----------
+
+# caffeinate_start_epoch: derive when the running caffeinate began, from the
+# assertion age (e.g. "60:20:04"). Falls back to empty if unavailable.
+caffeinate_start_epoch() {
+  local el h m s
+  el=$(pmset -g assertions 2>/dev/null \
+       | awk '/pid [0-9]+\(caffeinate\).*PreventUserIdleSystemSleep/{print $4; exit}')
+  [ -z "$el" ] && return 1
+  IFS=: read -r h m s <<< "$el"
+  echo $(( $(date +%s) - (10#$h*3600 + 10#$m*60 + 10#$s) ))
+}
+
+cmd_audit() {
+  local days=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --days) days="${2:?missing value}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  local start_epoch start_str
+  if start_epoch=$(caffeinate_start_epoch) && [ -n "$start_epoch" ]; then
+    start_str=$(date -r "$start_epoch" '+%Y-%m-%d %H:%M:%S')
+  else
+    start_str=""
+  fi
+  # --days overrides: audit the tail of the window regardless of start time
+  if [ "$days" -gt 0 ] 2>/dev/null; then
+    start_epoch=$(( $(date +%s) - days*86400 ))
+    start_str=$(date -r "$start_epoch" '+%Y-%m-%d %H:%M:%S')
+  fi
+
+  echo "================ AUDIT ================="
+  if [ -n "$start_str" ]; then
+    echo "[INFO] window start (caffeinate): $start_str"
+  else
+    echo "[WARN] could not derive caffeinate start; auditing whole power log"
+  fi
+
+  # Collect events at/after the window inside a single awk pass (timestamp
+  # comparison is lexicographic and safe for the "%Y-%m-%d %H:%M:%S" prefix).
+  local events
+  events=$(pmset -g log 2>/dev/null \
+    | grep -E "Entering (Sleep|DarkWake) state" \
+    | awk -v t="$start_str" -F'	' 'length(t)==0 || substr($0,1,19) >= t')
+
+  if [ -z "$events" ]; then
+    echo "[OK]   zero sleep events in window — machine never slept"
+  else
+    local total ac batt real_sleep_ac
+    total=$(printf '%s\n' "$events" | wc -l | tr -d ' ')
+    ac=$(printf '%s\n' "$events" | grep -c "Using AC")
+    batt=$(printf '%s\n' "$events" | grep -c "Using Batt")
+    real_sleep_ac=$(printf '%s\n' "$events" | grep "Entering Sleep state" | grep -c "Using AC")
+
+    echo "[INFO] sleep/wake events in window: $total  (AC=$ac  BATT=$batt)"
+
+    # Real (non-darkwake) sleep on AC means the assertions are not holding.
+    if [ "$real_sleep_ac" -gt 0 ]; then
+      echo "[FAIL] $real_sleep_ac full Sleep event(s) on AC — assertions not holding"
+      printf '%s\n' "$events" | grep "Entering Sleep state" | grep "Using AC" \
+        | cut -c1-19 | sed 's/^/         /'
+    else
+      echo "[OK]   zero full-Sleep events on AC — no power-loss sleep"
+    fi
+
+    # Clamshell DarkWake on AC: the Mac drops to DarkWake while the lid is shut
+    # even with caffeinate assertions. Long gaps are the real 24/7 risk.
+    local clam_ac
+    clam_ac=$(printf '%s\n' "$events" | grep "DarkWake state due to 'Clamshell" | grep -c "Using AC")
+    if [ "$clam_ac" -gt 0 ]; then
+      echo "[WARN] $clam_ac clamshell DarkWake event(s) on AC (lid-shut drop-outs)"
+      echo "       Longest gap:"
+      longest_gap "$start_str" | sed 's/^/         /'
+    fi
+
+    # Battery events: expected only if unplugged; each one is a real outage.
+    if [ "$batt" -gt 0 ]; then
+      echo "[WARN] $batt event(s) on battery — outage while unplugged"
+      printf '%s\n' "$events" | grep "Using Batt" | cut -c1-19 | head -3 | sed 's/^/         first: /'
+      echo "         (plug in AC for true 24/7; lid-close never holds on battery)"
+    fi
+  fi
+
+  # Overall awake ratio from boot.
+  echo "[INFO] uptime: $(uptime | sed 's/.*up //; s/,.*//')"
+  echo "========================================"
+}
+
+# longest_gap: print the longest silent stretch between consecutive sleep/wake
+# events, which approximates how long the machine was actually down.
+longest_gap() {
+  local start_str="$1"
+  # Build "epoch<TAB>readable" pairs, then let awk pick the largest delta.
+  # (BSD awk on macOS has no strftime, so formatting stays in date/sed.)
+  pmset -g log 2>/dev/null \
+    | grep -E "Entering (Sleep|DarkWake) state|Wake from" \
+    | awk -v t="$start_str" 'length(t)==0 || substr($0,1,19) >= t' \
+    | grep -oE "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}" \
+    | while IFS= read -r ts; do
+        e=$(date -j -f "%Y-%m-%d %H:%M:%S" "$ts" +%s 2>/dev/null) || continue
+        printf '%s\t%s\n' "$e" "$ts"
+      done \
+    | awk -F'\t' 'NR>1{d=$1-p; if(d>max){max=d; a=pt; b=$2}} {p=$1; pt=$2}
+                  END{if(max>0) printf "%d min (%s -> %s)\n", max/60, a, b}'
+}
+
 case "${1:-}" in
   setup)  shift; cmd_setup "$@" ;;
   verify) shift; cmd_verify "$@" ;;
+  audit)  shift; cmd_audit "$@" ;;
   remove) shift; cmd_remove "$@" ;;
-  *) die "usage: $0 {setup [--display-sleep <min|keep|off>] [--appnap-bundle <id>]... | verify | remove}" ;;
+  *) die "usage: $0 {setup [--display-sleep <min|keep|off>] [--appnap-bundle <id>]... | verify | audit [--days N] | remove}" ;;
 esac

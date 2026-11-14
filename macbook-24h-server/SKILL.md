@@ -46,8 +46,11 @@ pmset -g batt | head -1  # AC vs battery
 sw_vers                  # macOS version
 ```
 
-Warn the user up front: lid-close protection requires **AC power** (Apple hard
+Warn the user up front: lid-close operation requires **AC power** (Apple hard
 rule — on battery, closing the lid always sleeps regardless of this setup).
+Even on AC, a closed lid does **not** give full always-on service: macOS drops
+the machine to `DarkWake`, which suspends user processes and can silence a
+remote session for hours. See "Lid-close reality" below.
 
 ### 2. Ask about remote-control apps
 
@@ -112,13 +115,40 @@ All of these must be green/informational:
 - LaunchAgent plist exists (login persistence)
 - App Nap flag per requested bundle
 
+`verify` only inspects **current configuration**. It will report green on a
+machine that slept for hours yesterday, so it is necessary but not sufficient.
+
+### 4b. Audit (proof from history, not configuration)
+
+```bash
+bash scripts/macbook-24h-server.sh audit [--days N]
+```
+
+Reads `pmset -g log` from the moment `caffeinate` started (derived from the
+live assertion age) and separates three failure modes that need different
+fixes:
+
+| Signal | Meaning | Fix |
+|---|---|---|
+| full `Sleep` on AC | assertions not holding | re-run setup, check plist |
+| `DarkWake` on AC, lid shut | lid-close drop-out (see below) | leave the lid open |
+| events on battery | unplugged / power cut | plug in AC |
+
+Always run `audit` before telling a user their machine has been up
+continuously. `uptime` alone is misleading: the host counts time since boot,
+so it looks identical whether the machine served requests or was asleep.
+
 ### 5. Handoff notes to the user
 
 - Plug in power for true 24/7 operation.
+- Keep the lid **open** with the display off. A closed lid on AC drops to
+  `DarkWake` and will strand remote sessions (see "Lid-close reality").
 - If App Nap was disabled for an app, **relaunch that app now** (or tell the
   user to) — the flag is read at process start.
 - Keep the Mac on one stable network; roaming between home Wi-Fi and a phone
   hotspot breaks long-lived remote connections.
+- If the user asks "is it still up?", run `audit`, not `uptime`. A report of
+  continuous uptime is only true if the power log shows no gaps.
 
 ## Undo
 
@@ -129,6 +159,37 @@ bash scripts/macbook-24h-server.sh remove
 Removes the LaunchAgent and running caffeinate. The `displaysleep` value is
 left as-is; restore with `sudo pmset -c displaysleep 10` if the user wants the
 old default back.
+
+## Lid-close reality (measured, not assumed)
+
+On AC power with the lid **open** and the display off, `caffeinate -ims` holds
+system, disk and network awake indefinitely. On AC with the lid **closed**, the
+machine does not enter full `Sleep`, but it does enter `DarkWake`:
+
+```
+Entering DarkWake state due to 'Clamshell Sleep' ... Using AC
+```
+
+`DarkWake` suspends the CPU-heavy path and most user processes, reviving them
+only for scheduled maintenance windows. A measured run on a MacBook recorded 12
+such drops on AC, the longest spanning **467 minutes** with no wake or
+user-activity record at all.
+
+Consequences for a 24/7 server:
+
+- An interactive remote session does not survive `DarkWake`. The transport is
+  torn down and the machine appears offline even though `pmset -g assertions`
+  stays all green — the same *symptom* as the App Nap problem, a different
+  *cause*. `NSAppSleepDisabled` does nothing for it.
+- Background jobs that need to run continuously (builds, downloads, long agent
+  runs) are suspended just as effectively as if the machine had slept.
+- `uptime` is not evidence. It counts time since boot, so it reads the same
+  whether the machine served requests or sat in `DarkWake`.
+
+The supported 24/7 mode is therefore: **plugged in, lid open, display off.**
+Tell the user this plainly rather than implying a closed lid is fine on AC. If
+the machine must be physically closed, it is a scheduled-wake server, not an
+always-on one.
 
 ## Known pitfall: "machine awake but remote control dead"
 
